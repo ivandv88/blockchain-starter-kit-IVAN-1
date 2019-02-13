@@ -12,197 +12,213 @@
  * limitations under the License.
  */
 
-
 /**
  * A shipment has been received by an importer
- * @param {org.accordproject.perishablegoods.ShipmentReceived} shipmentReceived - the ShipmentReceived transaction
+ * @param {org.acme.shipping.perishable.ShipmentReceived} shipmentReceived - the ShipmentReceived transaction
  * @transaction
  */
 function payOut(shipmentReceived) {
 
+    var contract = shipmentReceived.shipment.contract;
     var shipment = shipmentReceived.shipment;
-    // console.log('received: ' + JSON.stringify(getSerializer().toJSON(shipmentReceived, {permitResourcesForRelationships: true})));
-    var json = getSerializer().toJSON(shipmentReceived, {permitResourcesForRelationships: true});
-    
-    var token = shipment.smartClauseKey;
+    var payOut = contract.unitPrice * shipment.unitCount;
 
-    // The Clause template doesn't include these fields
-    delete json.shipment.smartClauseKey;
-    delete json.shipment.grower;
-    delete json.shipment.importer;
-    
+    //console.log('Received at: ' + shipmentReceived.timestamp);
+    //console.log('Contract arrivalDateTime: ' + contract.arrivalDateTime);
+
     // set the status of the shipment
     shipment.status = 'ARRIVED';
 
-    // execute the smart clause
-    console.log(shipment.smartClause);
-    return request.post({ 
-        uri: shipment.smartClause, 
-        json: json,
-        headers: {
-            Authorization: 'Bearer ' + token,
-        },
-    })
-        .then(function (result) {
-            var totalPrice = result.totalPrice.doubleValue;
-            console.log('Payout: ' + totalPrice);
-            shipment.grower.accountBalance += totalPrice;
-            shipment.importer.accountBalance -= totalPrice;
+    // if the shipment did not arrive on time the payout is zero
+    if (shipmentReceived.timestamp > contract.arrivalDateTime) {
+        payOut = 0;
+        //console.log('Late shipment');
+    } else {
+        // find the lowest temperature reading
+        if (shipment.temperatureReadings) {
+            // sort the temperatureReadings by celsius
+            shipment.temperatureReadings.sort(function (a, b) {
+                return (a.celsius - b.celsius);
+            });
+            var lowestReading = shipment.temperatureReadings[0];
+            var highestReading = shipment.temperatureReadings[shipment.temperatureReadings.length - 1];
+            var penalty = 0;
+            //console.log('Lowest temp reading: ' + lowestReading.celsius);
+            //console.log('Highest temp reading: ' + highestReading.celsius);
 
-            console.log('Grower: ' + shipment.grower.$identifier + ' new balance: ' + shipment.grower.accountBalance);
-            console.log('Importer: ' + shipment.importer.$identifier + ' new balance: ' + shipment.importer.accountBalance);
+            // does the lowest temperature violate the contract?
+            if (lowestReading.celsius < contract.minTemperature) {
+                penalty += (contract.minTemperature - lowestReading.celsius) * contract.minPenaltyFactor;
+                //console.log('Min temp penalty: ' + penalty);
+            }
 
-            return getParticipantRegistry('org.accordproject.perishablegoods.Grower')
-                .then(function (growerRegistry) {
-                    // update the grower's balance
-                    return growerRegistry.update(shipment.grower);
-                })
-                .then(function () {
-                    return getParticipantRegistry('org.accordproject.perishablegoods.Importer');
-                })
-                .then(function (importerRegistry) {
-                    // update the importer's balance
-                    return importerRegistry.update(shipment.importer);
-                })
-                .then(function () {
-                    return getAssetRegistry('org.accordproject.perishablegoods.Shipment');
-                })
-                .then(function (shipmentRegistry) {
-                    // update the state of the shipment
-                    const response = shipmentRegistry.update(shipment);
+            // does the highest temperature violate the contract?
+            if (highestReading.celsius > contract.maxTemperature) {
+                penalty += (highestReading.celsius - contract.maxTemperature) * contract.maxPenaltyFactor;
+                //console.log('Max temp penalty: ' + penalty);
+            }
 
-                    var factory = getFactory();
-                    var basicEvent = factory.newEvent('org.accordproject.perishablegoods', 'TransactionCompletedEvent');
-                    emit(basicEvent);
+            // apply any penalities
+            payOut -= (penalty * shipment.unitCount);
 
-                    return response;
-                });
+            if (payOut < 0) {
+                payOut = 0;
+            }
+        }
+    }
+
+    //console.log('Payout: ' + payOut);
+    contract.grower.accountBalance += payOut;
+    contract.importer.accountBalance -= payOut;
+
+    //console.log('Grower: ' + contract.grower.$identifier + ' new balance: ' + contract.grower.accountBalance);
+    //console.log('Importer: ' + contract.importer.$identifier + ' new balance: ' + contract.importer.accountBalance);
+
+    return getParticipantRegistry('org.acme.shipping.perishable.Grower')
+        .then(function (growerRegistry) {
+            // update the grower's balance
+            return growerRegistry.update(contract.grower);
+        })
+        .then(function () {
+            return getParticipantRegistry('org.acme.shipping.perishable.Importer');
+        })
+        .then(function (importerRegistry) {
+            // update the importer's balance
+            return importerRegistry.update(contract.importer);
+        })
+        .then(function () {
+            return getAssetRegistry('org.acme.shipping.perishable.Shipment');
+        })
+        .then(function (shipmentRegistry) {
+            // update the state of the shipment
+            return shipmentRegistry.update(shipment);
         });
 }
 
 /**
  * A temperature reading has been received for a shipment
- * @param {org.accordproject.perishablegoods.SensorReading} sensorReading - the SensorReading transaction
+ * @param {org.acme.shipping.perishable.TemperatureReading} temperatureReading - the TemperatureReading transaction
  * @transaction
  */
-function sensorReading(sensorReading) {
+function temperatureReading(temperatureReading) {
 
-    var shipment = sensorReading.shipment;
+    var shipment = temperatureReading.shipment;
+    var NS = 'org.acme.shipping.perishable';
+    var contract = shipment.contract;
+    var factory = getFactory();
 
-    console.log('Adding temperature ' + sensorReading.centigrade + ' to shipment ' + shipment.$identifier);
-    console.log('Adding humidity ' + sensorReading.humidity + ' to shipment ' + shipment.$identifier);
+    //console.log('Adding temperature ' + temperatureReading.celsius + ' to shipment ' + shipment.$identifier);
 
-    if (shipment.sensorReadings) {
-        shipment.sensorReadings.push(sensorReading);
+    if (shipment.temperatureReadings) {
+        shipment.temperatureReadings.push(temperatureReading);
     } else {
-        shipment.sensorReadings = [sensorReading];
+        shipment.temperatureReadings = [temperatureReading];
     }
 
-    // console.log('Sensor reading count: ' + shipment.sensorReadings.length + ' for shipment ' + shipment.$identifier);
+    if (temperatureReading.celsius < contract.minTemperature ||
+        temperatureReading.celsius > contract.maxTemperature) {
+        var temperatureEvent = factory.newEvent(NS, 'TemperatureThresholdEvent');
+        temperatureEvent.shipment = shipment;
+        temperatureEvent.temperature = temperatureReading.celsius;
+        temperatureEvent.latitude = temperatureReading.latitude;
+        temperatureEvent.longitude = temperatureReading.longitude;
+        temperatureEvent.readingTime = temperatureReading.readingTime;
+        temperatureEvent.message = 'Temperature threshold violated! Emitting TemperatureEvent for shipment: ' + shipment.$identifier;
+        emit(temperatureEvent);
+    }
 
-    return getAssetRegistry('org.accordproject.perishablegoods.Shipment')
+    return getAssetRegistry(NS + '.Shipment')
         .then(function (shipmentRegistry) {
-            // add the sensor reading to the shipment
-            const response = shipmentRegistry.update(shipment);
-
-            var factory = getFactory();
-            var basicEvent = factory.newEvent('org.accordproject.perishablegoods', 'TransactionCompletedEvent');
-            emit(basicEvent);
-            return response;
+            // add the temp reading to the shipment
+            return shipmentRegistry.update(shipment);
         });
 }
 
 /**
- * @param {org.accordproject.perishablegoods.AddShipment} AddShipment - the AddShipment transaction
+ * An Acceleration reading has been received for a shipment
+ * @param {org.acme.shipping.perishable.AccelReading} AccelReading - the AccelReading transaction
  * @transaction
  */
-function addShipment(tx){
-    // create the shipment
+function AccelReading(AccelReading) {
+    var shipment = AccelReading.shipment;
+    var NS = 'org.acme.shipping.perishable';
+    var contract = shipment.contract;
     var factory = getFactory();
-    var NS = 'org.accordproject.perishablegoods';
-    const shipment = factory.newResource(NS, 'Shipment', tx.shipment.$identifier);
-    shipment.smartClause = tx.shipment.smartClause;
-    shipment.smartClauseKey = tx.shipment.smartClauseKey;
-    shipment.status = tx.shipment.status;
-    shipment.grower = factory.newRelationship(NS,'Grower', tx.shipment.grower.$identifier);
-    shipment.importer = factory.newRelationship(NS,'Importer', tx.shipment.importer.$identifier);
+
+    //console.log('Adding acceleration ' + AccelReading.accel_x + ' to shipment ' + shipment.$identifier);
+
+    if (shipment.AccelReadings) {
+        shipment.AccelReadings.push(AccelReading);
+    } else {
+        shipment.AccelReadings = [AccelReading];
+    }
+
+    // Also test for accel_y / accel_z
+    if (AccelReading.accel_x < contract.maxAccel ) {
+        var AccelerationEvent = factory.newEvent(NS, 'AccelerationThresholdEvent');
+        AccelerationEvent.shipment = shipment;
+        AccelerationEvent.accel_x = AccelReading.accel_x;
+        AccelerationEvent.accel_y = AccelReading.accel_y;
+        AccelerationEvent.accel_z = AccelReading.accel_z;
+	AccelerationEvent.latitude = AccelReading.latitude;
+        AccelerationEvent.longitude = AccelReading.longitude;
+        AccelerationEvent.readingTime = AccelReading.readingTime;
+        AccelerationEvent.message = 'Acceleration threshold violated! Emitting AccelerationEvent for shipment: ' + shipment.$identifier;
+        emit(AccelerationEvent);
+    }
+
+    return getAssetRegistry(NS + '.Shipment')
+        .then(function (shipmentRegistry) {
+            // add the temp reading to the shipment
+            return shipmentRegistry.update(shipment);
+        });
+}
+
+/**
+ * A GPS reading has been received for a shipment
+ * @param {org.acme.shipping.perishable.GpsReading} gpsReading - the GpsReading transaction
+ * @transaction
+ */
+function gpsReading(gpsReading) {
+
+    var factory = getFactory();
+    var NS = "org.acme.shipping.perishable";
+    var shipment = gpsReading.shipment;
+    var UNIVERSITY = '/LAT:41.607276N/LONG:14.2630543E';
+
+    if (shipment.gpsReadings) {
+        shipment.gpsReadings.push(gpsReading);
+    } else {
+        shipment.gpsReadings = [gpsReading];
+    }
+
+    var latLong = '/LAT:' + gpsReading.latitude + gpsReading.latitudeDir + '/LONG:' +
+    gpsReading.longitude + gpsReading.longitudeDir;
+
+    if (latLong == UNIVERSITY) {
+        var shipmentInPortEvent = factory.newEvent(NS, 'ShipmentInPortEvent');
+        shipmentInPortEvent.shipment = shipment;
+        var message = 'Shipment has reached the destination port of ' + UNIVERSITY;
+        shipmentInPortEvent.message = message;
+        emit(shipmentInPortEvent);
+    }
 
     return getAssetRegistry(NS + '.Shipment')
     .then(function (shipmentRegistry) {
-        // add the shipments
-        const response = shipmentRegistry.addAll([shipment]);
-
-        var factory = getFactory();
-        var basicEvent = factory.newEvent('org.accordproject.perishablegoods', 'TransactionCompletedEvent');
-        emit(basicEvent);
-
-        return response;
+        // add the temp reading to the shipment
+        return shipmentRegistry.update(shipment);
     });
 }
 
 /**
- * @param {org.accordproject.perishablegoods.AddImporter} AddImporter - the AddImporter transaction
- * @transaction
- */
-function addImporter(tx){
-    // create the grower
-    var factory = getFactory();
-    var NS = 'org.accordproject.perishablegoods';
-    var importer = factory.newResource(NS, 'Importer', tx.participant.$identifier);
-    var importerAddress = factory.newConcept(NS, 'Address');
-    importerAddress.country = 'USA';
-    importer.address = importerAddress;
-    importer.accountBalance = tx.participant.accountBalance;
-
-    return getParticipantRegistry(NS + '.Importer')
-    .then(function (importerRegistry) {
-        // add the growers
-        const response = importerRegistry.addAll([importer]);
-
-        var factory = getFactory();
-        var basicEvent = factory.newEvent('org.accordproject.perishablegoods', 'TransactionCompletedEvent');
-        emit(basicEvent);
-
-        return response;
-    })
-}
-
-/**
- * @param {org.accordproject.perishablegoods.AddGrower} AddGrower - the AddGrower transaction
- * @transaction
- */
-function addGrower(tx){
-    // create the grower
-    var factory = getFactory();
-    var NS = 'org.accordproject.perishablegoods';
-    var grower = factory.newResource(NS, 'Grower', tx.participant.$identifier);
-    var growerAddress = factory.newConcept(NS, 'Address');
-    growerAddress.country = 'USA';
-    grower.address = growerAddress;
-    grower.accountBalance = tx.participant.accountBalance;
-
-    return getParticipantRegistry(NS + '.Grower')
-    .then(function (growerRegistry) {
-        // add the growers
-        const response = growerRegistry.addAll([grower]);
-
-        var factory = getFactory();
-        var basicEvent = factory.newEvent('org.accordproject.perishablegoods', 'TransactionCompletedEvent');
-        emit(basicEvent);
-
-        return response;
-    })
-}
-
-/**
  * Initialize some test assets and participants useful for running a demo.
- * @param {org.accordproject.perishablegoods.SetupDemo} setupDemo - the SetupDemo transaction
+ * @param {org.acme.shipping.perishable.SetupDemo} setupDemo - the SetupDemo transaction
  * @transaction
  */
 function setupDemo(setupDemo) {
 
     var factory = getFactory();
-    var NS = 'org.accordproject.perishablegoods';
+    var NS = 'org.acme.shipping.perishable';
 
     // create the grower
     var grower = factory.newResource(NS, 'Grower', 'farmer@email.com');
@@ -225,36 +241,57 @@ function setupDemo(setupDemo) {
     shipper.address = shipperAddress;
     shipper.accountBalance = 0;
 
+    // create the contract
+    var contract = factory.newResource(NS, 'Contract', 'CON_002');
+    contract.grower = factory.newRelationship(NS, 'Grower', 'farmer@email.com');
+    contract.importer = factory.newRelationship(NS, 'Importer', 'supermarket@email.com');
+    contract.shipper = factory.newRelationship(NS, 'Shipper', 'shipper@email.com');
+    var tomorrow = setupDemo.timestamp;
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    contract.arrivalDateTime = tomorrow; // the shipment has to arrive tomorrow
+    contract.unitPrice = 0.5; // pay 50 cents per unit
+    contract.minTemperature = 2; // min temperature for the cargo
+    contract.maxTemperature = 10; // max temperature for the cargo
+    contract.maxAccel = 15000; // max acceleration for the cargo
+    contract.minPenaltyFactor = 0.2; // we reduce the price by 20 cents for every degree below the min temp
+    contract.maxPenaltyFactor = 0.1; // we reduce the price by 10 cents for every degree above the max temp
+
     // create the shipment
-    var shipment = factory.newResource(NS, 'Shipment', 'SHIP_001');
-    shipment.smartClause = 'https://api.clause.io/clauses/aaaaaaaaaaaaaaaaaaaaaaaa/trigger';
-    shipment.smartClauseKey = 'TOKEN'
+    var shipment = factory.newResource(NS, 'Shipment', '39002c000e47373334363431');
+    shipment.type = 'MEDICINE';
     shipment.status = 'IN_TRANSIT';
-    shipment.grower = factory.newRelationship(NS,'Grower', grower.$identifier);
-    shipment.importer = factory.newRelationship(NS,'Importer', importer.$identifier);
+    shipment.unitCount = 5000;
+    shipment.contract = factory.newRelationship(NS, 'Contract', 'CON_002');
     return getParticipantRegistry(NS + '.Grower')
         .then(function (growerRegistry) {
             // add the growers
             return growerRegistry.addAll([grower]);
         })
-        .then(function () {
+        .then(function() {
             return getParticipantRegistry(NS + '.Importer');
         })
-        .then(function (importerRegistry) {
+        .then(function(importerRegistry) {
             // add the importers
             return importerRegistry.addAll([importer]);
         })
-        .then(function () {
+        .then(function() {
             return getParticipantRegistry(NS + '.Shipper');
         })
-        .then(function (shipperRegistry) {
+        .then(function(shipperRegistry) {
             // add the shippers
             return shipperRegistry.addAll([shipper]);
         })
-        .then(function () {
+        .then(function() {
+            return getAssetRegistry(NS + '.Contract');
+        })
+        .then(function(contractRegistry) {
+            // add the contracts
+            return contractRegistry.addAll([contract]);
+        })
+        .then(function() {
             return getAssetRegistry(NS + '.Shipment');
         })
-        .then(function (shipmentRegistry) {
+        .then(function(shipmentRegistry) {
             // add the shipments
             return shipmentRegistry.addAll([shipment]);
         });
