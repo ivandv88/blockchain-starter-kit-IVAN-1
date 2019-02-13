@@ -1,12 +1,36 @@
-/**
-  * A business network for shipping perishable goods
-  * The cargo is temperature controlled and contracts
-  * can be negociated based on the temperature
-  * readings received for the cargo
-  */
-namespace org.accordproject.perishablegoods
+/*
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
-import org.accordproject.money.MonetaryAmount
+/**
+ * A business network for shipping perishable goods
+ * The cargo is temperature controlled and contracts
+ * can be negociated based on the temperature
+ * readings received for the cargo
+ */
+
+namespace org.acme.shipping.perishable
+
+/**
+ * The type of perishable product being shipped
+ */
+enum ProductType {
+  o BANANAS
+  o APPLES
+  o PEARS
+  o PEACHES
+  o COFFEE
+}
 
 /**
  * The status of a shipment
@@ -17,67 +41,57 @@ enum ShipmentStatus {
   o ARRIVED
 }
 
-enum Unit {
-  o KG
-  o BUSHEL
-  o TONNE
-  o BARREL
-  o CORD
-}
-
-enum Duration {
-  o WEEK
-  o HOUR
-  o DAY
-  o MONTH
-  o YEAR
-  o MINUTE
+/**
+ * Directions of the compass
+ */
+enum CompassDirection {
+  o N
+  o S
+  o E
+  o W
 }
 
 /**
  * An abstract transaction that is related to a Shipment
  */
 abstract transaction ShipmentTransaction {
-    --> Shipment shipment
+  --> Shipment shipment
+}
+
+transaction AccelReading extends ShipmentTransaction {
+  o Double accel_x
+  o Double accel_y
+  o Double accel_z
+  o String latitude
+  o String longitude
+  o String readingTime
 }
 
 /**
  * An temperature reading for a shipment. E.g. received from a
  * device within a temperature controlled shipping container
  */
-transaction SensorReading extends ShipmentTransaction {
-  o Double centigrade
-  o Double humidity
+transaction TemperatureReading extends ShipmentTransaction {
+  o Double celsius
+  o String latitude
+  o String longitude
+  o String readingTime
 }
-
 /**
  * A notification that a shipment has been received by the
  * importer and that funds should be transferred from the importer
  * to the grower to pay for the shipment.
  */
 transaction ShipmentReceived extends ShipmentTransaction {
-    o Integer unitCount
 }
 
-transaction AddGrower {
-  o Grower participant
-}
-
-transaction AddImporter {
-  o Importer participant
-}
-
-transaction AddShipment {
-  o Shipment shipment
-}
-
-/**
- * The calculation of a price
- */
-transaction PriceCalculation extends ShipmentTransaction {
-  o MonetaryAmount totalPrice
-  o MonetaryAmount penalty
-  o Boolean late
+transaction GpsReading extends ShipmentTransaction {
+  o String readingTime
+  o String readingDate
+  o String latitude
+  o CompassDirection latitudeDir
+  o String longitude
+  o CompassDirection longitudeDir
 }
 
 /**
@@ -85,15 +99,33 @@ transaction PriceCalculation extends ShipmentTransaction {
  */
 asset Shipment identified by shipmentId {
   o String shipmentId
+  o ProductType type
   o ShipmentStatus status
+  o Long unitCount
+  --> Contract contract
+  o TemperatureReading[] temperatureReadings optional
+  o AccelReading[] AccelReadings optional
+  o GpsReading[] gpsReadings optional
+}
+
+/**
+ * Defines a contract between a Grower and an Importer to ship using
+ * a Shipper, paying a set unit price. The unit price is multiplied by
+ * a penality factor proportional to the deviation from the min and max
+ * negociated temperatures for the shipment.
+ */
+asset Contract identified by contractId {
+  o String contractId
   --> Grower grower
+  --> Shipper shipper
   --> Importer importer
-  o SensorReading[] sensorReadings optional
-  /**
-   * the link to the smart clause for this shipment
-   */
-  o String smartClause
-  o String smartClauseKey
+  o DateTime arrivalDateTime
+  o Double unitPrice
+  o Double minTemperature
+  o Double maxTemperature
+  o Double minPenaltyFactor
+  o Double maxPenaltyFactor
+  o Double maxAccel
 }
 
 /**
@@ -133,11 +165,32 @@ participant Shipper extends Business {
 participant Importer extends Business {
 }
 
+event TemperatureThresholdEvent {
+  o String message
+  o Double temperature
+  o String latitude
+  o String longitude
+  o String readingTime
+  --> Shipment shipment
+}
+
+event AccelerationThresholdEvent {
+  o String message
+  o Double accel_x
+  o Double accel_y
+  o Double accel_z
+  o String latitude
+  o String longitude
+  o String readingTime
+  --> Shipment shipment
+}
+
+event ShipmentInPortEvent {
+  o String message
+  --> Shipment shipment
+}
 /**
  * JUST FOR INITIALIZING A DEMO
  */
 transaction SetupDemo {
-}
-
-event TransactionCompletedEvent {
 }
