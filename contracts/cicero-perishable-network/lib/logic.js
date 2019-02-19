@@ -258,7 +258,7 @@ function setupDemo(setupDemo) {
 
     // create the shipment
     var shipment = factory.newResource(NS, 'Shipment', '39002c000e47373334363431');
-    shipment.type = 'MEDICINE';
+    shipment.type = 'APPLES';
     shipment.status = 'IN_TRANSIT';
     shipment.unitCount = 5000;
     shipment.contract = factory.newRelationship(NS, 'Contract', 'CON_002');
