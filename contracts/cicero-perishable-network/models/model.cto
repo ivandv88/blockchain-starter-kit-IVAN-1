@@ -30,6 +30,7 @@ enum ProductType {
   o PEARS
   o PEACHES
   o COFFEE
+  o MEDICINE
 }
 
 /**
